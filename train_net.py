@@ -6,7 +6,7 @@ from detectron2.checkpoint import DetectionCheckpointer
 from detectron2.config import get_cfg
 from detectron2.engine import default_argument_parser, default_setup, launch
 
-from adapteacher import add_ateacher_config
+from adapteacher import add_ateacher_config # 导入at模型默认config
 from adapteacher.engine.trainer import ATeacherTrainer, BaselineTrainer
 
 # hacky way to register
@@ -78,3 +78,4 @@ if __name__ == "__main__":
         dist_url=args.dist_url,
         args=(args,),
     )
+    # main(args)
