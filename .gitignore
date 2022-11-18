@@ -4,3 +4,5 @@
 log_1.log
 output
 weights
+change_model_weight.py
+test.ipynb
