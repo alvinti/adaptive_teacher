@@ -101,14 +101,26 @@ class DAobjTwoStagePseudoLabGeneralizedRCNN(GeneralizedRCNN):
         # @yujheli: you may need to build your discriminator here
 
         self.dis_type = dis_type
-        self.D_img = None
-        # self.D_img = FCDiscriminator_img(self.backbone._out_feature_channels['res4']) # Need to know the channel
-        
         # self.D_img = None
-        self.D_img = FCDiscriminator_img(self.backbone._out_feature_channels[self.dis_type]) # Need to know the channel
+        self.D_img_ins = None
+        self.D_img_2 = None
+        self.D_img_3 = None
+        self.D_img_4 = None
+        # self.D_img = FCDiscriminator_img(self.backbone._out_feature_channels['res4']) # Need to know the channel
+
+        # self.D_img = FCDiscriminator_img(self.backbone._out_feature_channels[self.dis_type]) # Need to know the channel
+        self.D_img_ins = FCDiscriminator_img(512)
+        self.D_img_2 = FCDiscriminator_img(self.backbone._out_feature_channels["vgg2"])
+        self.D_img_3 = FCDiscriminator_img(self.backbone._out_feature_channels["vgg3"])
+        self.D_img_4 = FCDiscriminator_img(self.backbone._out_feature_channels["vgg4"])
         # self.bceLoss_func = nn.BCEWithLogitsLoss()
     def build_discriminator(self):
-        self.D_img = FCDiscriminator_img(self.backbone._out_feature_channels[self.dis_type]).to(self.device) # Need to know the channel
+        # self.D_img = FCDiscriminator_img(self.backbone._out_feature_channels[self.dis_type]).to(self.device) # Need to know the channel
+        self.D_img_ins = FCDiscriminator_img(512)
+        self.D_img_2 = FCDiscriminator_img(self.backbone._out_feature_channels["vgg2"]).to(self.device)
+        self.D_img_3 = FCDiscriminator_img(self.backbone._out_feature_channels["vgg3"]).to(self.device)
+        self.D_img_4 = FCDiscriminator_img(self.backbone._out_feature_channels["vgg4"]).to(self.device)
+
 
     @classmethod
     def from_config(cls, cfg):
@@ -138,7 +150,16 @@ class DAobjTwoStagePseudoLabGeneralizedRCNN(GeneralizedRCNN):
         images_t = ImageList.from_tensors(images_t, self.backbone.size_divisibility)
 
         return images, images_t
-
+    
+    def focal_loss(self, x, domain_label, gamma = 1.5):
+        BCE = F.binary_cross_entropy_with_logits(x,torch.FloatTensor(x.data.size()).fill_(
+                                                                    domain_label).to(self.device))
+        p = torch.exp(-BCE)
+        
+        FLloss = (1-p) ** gamma * BCE# torch.log(domain_label + (-1) ** domain_label * F.sigmoid(x))
+        return FLloss
+        
+    
     def forward(
         self, batched_inputs, branch="supervised", given_proposals=None, val_mode=False
     ):
@@ -164,7 +185,7 @@ class DAobjTwoStagePseudoLabGeneralizedRCNN(GeneralizedRCNN):
                 The :class:`Instances` object has the following keys:
                 "pred_boxes", "pred_classes", "scores", "pred_masks", "pred_keypoints"
         """
-        if self.D_img == None:
+        if self.D_img_2 == None: # self.D_img_2 == None
             self.build_discriminator()
         if (not self.training) and (not val_mode):  # only conduct when testing mode
             return self.inference(batched_inputs)
@@ -177,32 +198,116 @@ class DAobjTwoStagePseudoLabGeneralizedRCNN(GeneralizedRCNN):
             # source_label = 0
             # target_label = 1
             # images = self.preprocess_image(batched_inputs)
+            
             images_s, images_t = self.preprocess_image_train(batched_inputs)
 
             features = self.backbone(images_s.tensor)
+            
+            if "instances" in batched_inputs[0]:
+                gt_instances = [x["instances"].to(self.device) for x in batched_inputs]
+            else:
+                gt_instances = None
+            # get the roi box_features
+            # 1.Region proposal network
+            proposals_rpn_s, _ = self.proposal_generator(
+                images_s, features, gt_instances
+            )
 
+            # 2.roi_head lower branch
+            _, _, box_features_s = self.roi_heads(
+                images_s,
+                features,
+                proposals_rpn_s,
+                compute_loss=True,
+                targets=gt_instances,
+                branch=branch,
+            )
             # import pdb
             # pdb.set_trace()
-           
-            features_s = grad_reverse(features[self.dis_type])
-            D_img_out_s = self.D_img(features_s)
-            loss_D_img_s = F.binary_cross_entropy_with_logits(D_img_out_s, torch.FloatTensor(D_img_out_s.data.size()).fill_(source_label).to(self.device))
+
+            # features_s = grad_reverse(features[self.dis_type])
+            # D_img_out_s = self.D_img(features_s)
+            # loss_D_img_s = F.binary_cross_entropy_with_logits(D_img_out_s, torch.FloatTensor(D_img_out_s.data.size()).fill_(source_label).to(self.device))
+            
+            box_features_s = grad_reverse(box_features_s)
+            features_s_2 = grad_reverse(features["vgg2"])
+            features_s_3 = grad_reverse(features["vgg3"])
+            features_s_4 = grad_reverse(features["vgg4"])
+
+            D_img_out_s_ins = self.D_img_ins(box_features_s)
+            D_img_out_s_2 = self.D_img_2(features_s_2)
+            loss_D_img_s_2 = F.binary_cross_entropy_with_logits(D_img_out_s_2,
+                                                                torch.FloatTensor(D_img_out_s_2.data.size()).fill_(
+                                                                    source_label).to(self.device))
+            D_img_out_s_3 = self.D_img_3(features_s_3)
+            loss_D_img_s_3 = F.binary_cross_entropy_with_logits(D_img_out_s_3,
+                                                                torch.FloatTensor(D_img_out_s_3.data.size()).fill_(
+                                                                    source_label).to(self.device))
+            D_img_out_s_4 = self.D_img_4(features_s_4)
+            # loss_D_img_s_4 = F.binary_cross_entropy_with_logits(D_img_out_s_4,
+            #                                                     torch.FloatTensor(D_img_out_s_4.data.size()).fill_(
+            #                                                         source_label).to(self.device))
+            loss_D_img_s_4 = self.focal_loss(D_img_out_s_4, source_label)
+            loss_D_img_s_ins = F.binary_cross_entropy_with_logits(D_img_out_s_ins, torch.FloatTensor(D_img_out_s_ins.data.size()).fill_(source_label).to(self.device))
+            # loss_D_img_s_ins = self.focal_loss(D_img_out_s_ins, source_label)
+            loss_D_img_s = loss_D_img_s_2 + loss_D_img_s_3 + loss_D_img_s_4#
+
 
             features_t = self.backbone(images_t.tensor)
-            
-            features_t = grad_reverse(features_t[self.dis_type])
-            # features_t = grad_reverse(features_t['p2'])
-            D_img_out_t = self.D_img(features_t)
-            loss_D_img_t = F.binary_cross_entropy_with_logits(D_img_out_t, torch.FloatTensor(D_img_out_t.data.size()).fill_(target_label).to(self.device))
+            # get the roi box_features
+            # 1.Region proposal network
+            proposals_rpn_t, _ = self.proposal_generator(
+                images_t, features_t, gt_instances
+            )
+
+            # 2.roi_head lower branch
+            _, _, box_features_t = self.roi_heads(
+                images_t,
+                features,
+                proposals_rpn_t,
+                compute_loss=True,
+                targets=gt_instances,
+                branch=branch,
+            )
+
+            # features_t = grad_reverse(features_t[self.dis_type])
+            # D_img_out_t = self.D_img(features_t)
+            # loss_D_img_t = F.binary_cross_entropy_with_logits(D_img_out_t, torch.FloatTensor(D_img_out_t.data.size()).fill_(target_label).to(self.device))
+           
+            features_t_2 = grad_reverse(features_t["vgg2"])
+            features_t_3 = grad_reverse(features_t["vgg3"])
+            features_t_4 = grad_reverse(features_t["vgg4"])
+
+            D_img_out_t_2 = self.D_img_2(features_t_2)
+            loss_D_img_t_2 = F.binary_cross_entropy_with_logits(D_img_out_t_2,
+                                                                torch.FloatTensor(D_img_out_t_2.data.size()).fill_(
+                                                                    target_label).to(self.device))
+            D_img_out_t_3 = self.D_img_3(features_t_3)
+            loss_D_img_t_3 = F.binary_cross_entropy_with_logits(D_img_out_t_3,
+                                                                torch.FloatTensor(D_img_out_t_3.data.size()).fill_(
+                                                                    target_label).to(self.device))
+            D_img_out_t_4 = self.D_img_4(features_t_4)
+            # loss_D_img_t_4 = F.binary_cross_entropy_with_logits(D_img_out_t_4,
+            #                                                     torch.FloatTensor(D_img_out_t_4.data.size()).fill_(
+            #                                                         target_label).to(self.device))
+            loss_D_img_t_4 = self.focal_loss(D_img_out_t_4, target_label)
+            # instance level Discriminator
+            box_features_t = grad_reverse(box_features_t) #TODO 忘了改box_feature_s！！他妈的！
+            D_img_out_t_ins = self.D_img_ins(box_features_t)
+            loss_D_img_t_ins = F.binary_cross_entropy_with_logits(D_img_out_t_ins, torch.FloatTensor(D_img_out_t_ins.data.size()).fill_(target_label).to(self.device))
+            # loss_D_img_t_ins = self.focal_loss(D_img_out_t_ins, target_label)
+            loss_D_img_t = loss_D_img_t_2 + loss_D_img_t_3 + loss_D_img_t_4 #
 
             # import pdb
             # pdb.set_trace()
 
             losses = {}
-            losses["loss_D_img_s"] = loss_D_img_s
-            losses["loss_D_img_t"] = loss_D_img_t
-            return losses, [], [], None
+            losses["loss_D_img_s"] = loss_D_img_s + loss_D_img_s_ins
+            losses["loss_D_img_t"] = loss_D_img_t + loss_D_img_t_ins
+            # return losses, [], [], None
+            return losses
 
+        
         # self.D_img.eval()
         images = self.preprocess_image(batched_inputs)
 
@@ -213,20 +318,38 @@ class DAobjTwoStagePseudoLabGeneralizedRCNN(GeneralizedRCNN):
 
         features = self.backbone(images.tensor)
 
+
         # TODO: remove the usage of if else here. This needs to be re-organized
         if branch.startswith("supervised"):
-            features_s = grad_reverse(features[self.dis_type])
-            D_img_out_s = self.D_img(features_s)
-            loss_D_img_s = F.binary_cross_entropy_with_logits(D_img_out_s, torch.FloatTensor(D_img_out_s.data.size()).fill_(source_label).to(self.device))
-
             
+            # features_s = grad_reverse(features[self.dis_type])
+            # D_img_out_s = self.D_img(features_s)
+            # loss_D_img_s = F.binary_cross_entropy_with_logits(D_img_out_s, torch.FloatTensor(D_img_out_s.data.size()).fill_(source_label).to(self.device))
+
+            features_s_2 = grad_reverse(features["vgg2"])
+            features_s_3 = grad_reverse(features["vgg3"])
+            features_s_4 = grad_reverse(features["vgg4"])
+    
+            D_img_out_s_2 = self.D_img_2(features_s_2)
+            loss_D_img_s_2 = F.binary_cross_entropy_with_logits(D_img_out_s_2,
+                                                              torch.FloatTensor(D_img_out_s_2.data.size()).fill_(
+                                                                  source_label).to(self.device))
+            D_img_out_s_3 = self.D_img_3(features_s_3)
+            loss_D_img_s_3 = F.binary_cross_entropy_with_logits(D_img_out_s_3,
+                                                                torch.FloatTensor(D_img_out_s_3.data.size()).fill_(
+                                                                    source_label).to(self.device))
+            D_img_out_s_4 = self.D_img_4(features_s_4)
+            # loss_D_img_s_4 = F.binary_cross_entropy_with_logits(D_img_out_s_4,
+            #                                                     torch.FloatTensor(D_img_out_s_4.data.size()).fill_(
+            #                                                         source_label).to(self.device))
+            loss_D_img_s_4 = self.focal_loss(D_img_out_s_4, source_label)
             # Region proposal network
             proposals_rpn, proposal_losses = self.proposal_generator(
                 images, features, gt_instances
             )
 
             # roi_head lower branch
-            _, detector_losses = self.roi_heads(
+            _, detector_losses, box_features = self.roi_heads(
                 images,
                 features,
                 proposals_rpn,
@@ -234,7 +357,10 @@ class DAobjTwoStagePseudoLabGeneralizedRCNN(GeneralizedRCNN):
                 targets=gt_instances,
                 branch=branch,
             )
-
+            box_features = grad_reverse(box_features)
+            D_img_out_ins = self.D_img_ins(box_features)
+            loss_D_img_ins = F.binary_cross_entropy_with_logits(D_img_out_ins, torch.FloatTensor(D_img_out_ins.data.size()).fill_(source_label).to(self.device))
+            # loss_D_img_ins = self.focal_loss(D_img_out_ins, source_label)
             # visualization
             if self.vis_period > 0:
                 storage = get_event_storage()
@@ -244,8 +370,10 @@ class DAobjTwoStagePseudoLabGeneralizedRCNN(GeneralizedRCNN):
             losses = {}
             losses.update(detector_losses)
             losses.update(proposal_losses)
-            losses["loss_D_img_s"] = loss_D_img_s*0.001
-            return losses, [], [], None
+            # losses["loss_D_img_s"] = (loss_D_img_s +loss_D_img_ins)*0.001
+            losses["loss_D_img_s"] = (loss_D_img_s_2 + loss_D_img_s_3 + loss_D_img_s_4 + loss_D_img_ins) * 0.001# 
+            # return losses, [], [], None  
+            return losses
 
         elif branch.startswith("supervised_target"):
 
@@ -253,14 +381,14 @@ class DAobjTwoStagePseudoLabGeneralizedRCNN(GeneralizedRCNN):
             # D_img_out_t = self.D_img(features_t)
             # loss_D_img_t = F.binary_cross_entropy_with_logits(D_img_out_t, torch.FloatTensor(D_img_out_t.data.size()).fill_(target_label).to(self.device))
 
-            
+
             # Region proposal network
             proposals_rpn, proposal_losses = self.proposal_generator(
                 images, features, gt_instances
             )
 
             # roi_head lower branch
-            _, detector_losses = self.roi_heads(
+            _, detector_losses,_ = self.roi_heads(
                 images,
                 features,
                 proposals_rpn,
@@ -280,6 +408,7 @@ class DAobjTwoStagePseudoLabGeneralizedRCNN(GeneralizedRCNN):
             losses.update(proposal_losses)
             # losses["loss_D_img_t"] = loss_D_img_t*0.001
             # losses["loss_D_img_s"] = loss_D_img_s*0.001
+            # return losses, [], [], None
             return losses, [], [], None
 
         elif branch == "unsup_data_weak":
@@ -307,7 +436,8 @@ class DAobjTwoStagePseudoLabGeneralizedRCNN(GeneralizedRCNN):
             #     if storage.iter % self.vis_period == 0:
             #         self.visualize_training(batched_inputs, proposals_rpn, branch)
 
-            return {}, proposals_rpn, proposals_roih, ROI_predictions
+            # return {}, proposals_rpn, proposals_roih, ROI_predictions
+            return proposals_rpn, proposals_roih, ROI_predictions
         elif branch == "unsup_data_strong":
             raise NotImplementedError()
         elif branch == "val_loss":
@@ -382,7 +512,7 @@ class TwoStagePseudoLabGeneralizedRCNN(GeneralizedRCNN):
             )
 
             # # roi_head lower branch
-            _, detector_losses = self.roi_heads(
+            _, detector_losses,_ = self.roi_heads(
                 images, features, proposals_rpn, gt_instances, branch=branch
             )
 
@@ -417,7 +547,7 @@ class TwoStagePseudoLabGeneralizedRCNN(GeneralizedRCNN):
             )
 
             # roi_head lower branch
-            _, detector_losses = self.roi_heads(
+            _, detector_losses,_ = self.roi_heads(
                 images,
                 features,
                 proposals_rpn,

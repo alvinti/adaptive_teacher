@@ -27,6 +27,7 @@ def setup(args):
     add_ateacher_config(cfg)
     cfg.merge_from_file(args.config_file)
     cfg.merge_from_list(args.opts)
+    # cfg.DATALOADER.NUM_WORKERS=0
     cfg.freeze()
     default_setup(cfg, args)
     return cfg
@@ -70,12 +71,12 @@ if __name__ == "__main__":
     args = default_argument_parser().parse_args()
 
     print("Command Line Args:", args)
-    launch(
-        main,
-        args.num_gpus,
-        num_machines=args.num_machines,
-        machine_rank=args.machine_rank,
-        dist_url=args.dist_url,
-        args=(args,),
-    )
-    # main(args)
+    # launch(
+    #     main,
+    #     args.num_gpus,
+    #     num_machines=args.num_machines,
+    #     machine_rank=args.machine_rank,
+    #     dist_url=args.dist_url,
+    #     args=(args,),
+    # )
+    main(args)

@@ -509,7 +509,9 @@ class ATeacherTrainer(DefaultTrainer):
 
             # input both strong and weak supervised data into model
             label_data_q.extend(label_data_k)
-            record_dict, _, _, _ = self.model(
+            # record_dict, _, _, _ = self.model(
+            #     label_data_q, branch="supervised")
+            record_dict = self.model(
                 label_data_q, branch="supervised")
 
             # weight losses
@@ -529,7 +531,7 @@ class ATeacherTrainer(DefaultTrainer):
                 self.iter - self.cfg.SEMISUPNET.BURN_UP_STEP
             ) % self.cfg.SEMISUPNET.TEACHER_UPDATE_ITER == 0:
                 self._update_teacher_model(
-                    keep_rate=self.cfg.SEMISUPNET.EMA_KEEP_RATE)
+                    keep_rate=self.cfg.SEMISUPNET.EMA_KEEP_RATE)# 该更新教师模型了
 
             record_dict = {}
 
@@ -544,13 +546,19 @@ class ATeacherTrainer(DefaultTrainer):
             unlabel_data_k = self.remove_label(unlabel_data_k)
 
             #  1. generate the pseudo-label using teacher model
+            # with torch.no_grad():
+            #     (
+            #         _,
+            #         proposals_rpn_unsup_k,
+            #         proposals_roih_unsup_k,
+            #         _,
+            #     ) = self.model_teacher(unlabel_data_k, branch="unsup_data_weak")
             with torch.no_grad():
                 (
-                    _,
                     proposals_rpn_unsup_k,
                     proposals_roih_unsup_k,
                     _,
-                ) = self.model_teacher(unlabel_data_k, branch="unsup_data_weak")
+                ) = self.model_teacher(unlabel_data_k, branch="unsup_data_weak") #将Target输入教师模型预测伪标签
 
             ######################## For probe #################################
             # import pdb; pdb. set_trace() 
@@ -596,13 +604,19 @@ class ATeacherTrainer(DefaultTrainer):
             all_unlabel_data = unlabel_data_q
 
             # 4. input both strongly and weakly augmented labeled data into student model
-            record_all_label_data, _, _, _ = self.model(
+            # record_all_label_data, _, _, _ = self.model(
+            #     all_label_data, branch="supervised"
+            # )
+            record_all_label_data = self.model(
                 all_label_data, branch="supervised"
             )
             record_dict.update(record_all_label_data)
 
             # 5. input strongly augmented unlabeled data into model
-            record_all_unlabel_data, _, _, _ = self.model(
+            # record_all_unlabel_data, _, _, _ = self.model(
+            #     all_unlabel_data, branch="supervised_target"
+            # )
+            record_all_unlabel_data = self.model(
                 all_unlabel_data, branch="supervised_target"
             )
             new_record_all_unlabel_data = {}
@@ -624,12 +638,14 @@ class ATeacherTrainer(DefaultTrainer):
 
             all_domain_data = label_data_k
             # all_domain_data = label_data_k + unlabel_data_k
-            record_all_domain_data, _, _, _ = self.model(all_domain_data, branch="domain")
+            # record_all_domain_data, _, _, _ = self.model(all_domain_data, branch="domain")
+            record_all_domain_data = self.model(all_domain_data, branch="domain")
             record_dict.update(record_all_domain_data)
 
 
             # weight losses
             loss_dict = {}
+            # print(record_dict.keys())
             for key in record_dict.keys():
                 if key.startswith("loss"):
                     if key == "loss_rpn_loc_pseudo" or key == "loss_box_reg_pseudo":
@@ -647,7 +663,7 @@ class ATeacherTrainer(DefaultTrainer):
                         # pdb.set_trace()
                         loss_dict[key] = record_dict[key] * self.cfg.SEMISUPNET.DIS_LOSS_WEIGHT #Need to modify defaults and yaml
                     else:  # supervised loss
-                        loss_dict[key] = record_dict[key] * 1
+                        loss_dict[key] = record_dict[key] * 1 # ((self.cfg.SOLVER.MAX_ITER-self.iter)/self.cfg.SOLVER.MAX_ITER)
 
             losses = sum(loss_dict.values())
 

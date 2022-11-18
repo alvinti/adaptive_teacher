@@ -92,10 +92,10 @@ class StandardROIHeadsPseudoLab(StandardROIHeads):
         del targets
 
         if (self.training and compute_loss) or compute_val_loss:
-            losses, _ = self._forward_box(
+            losses, _, box_features = self._forward_box(
                 features, proposals, compute_loss, compute_val_loss, branch
             )
-            return proposals, losses
+            return proposals, losses, box_features
         else:
             pred_instances, predictions = self._forward_box(
                 features, proposals, compute_loss, compute_val_loss, branch
@@ -113,8 +113,9 @@ class StandardROIHeadsPseudoLab(StandardROIHeads):
     ) -> Union[Dict[str, torch.Tensor], List[Instances]]:
         features = [features[f] for f in self.box_in_features]
         box_features = self.box_pooler(features, [x.proposal_boxes for x in proposals])
+        box_align_features = box_features
         box_features = self.box_head(box_features)
-        predictions = self.box_predictor(box_features)
+        predictions = self.box_predictor(box_features) # prediction包含最终的roi输出，即类别得分和bbox值
         del box_features
 
         if (
@@ -131,7 +132,7 @@ class StandardROIHeadsPseudoLab(StandardROIHeads):
                         proposals, pred_boxes
                     ):
                         proposals_per_image.proposal_boxes = Boxes(pred_boxes_per_image)
-            return losses, predictions
+            return losses, predictions, box_align_features
         else:
 
             pred_instances, _ = self.box_predictor.inference(predictions, proposals)

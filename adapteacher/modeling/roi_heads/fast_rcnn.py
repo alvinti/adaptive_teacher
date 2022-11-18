@@ -257,6 +257,6 @@ class FocalLoss(nn.Module):
     def forward(self, input, target):
         # focal loss
         CE = F.cross_entropy(input, target, reduction="none")
-        p = torch.exp(-CE)
+        p = torch.exp(-CE) # 过滤到只剩当前标签的概率
         loss = (1 - p) ** self.gamma * CE
         return loss.sum()
