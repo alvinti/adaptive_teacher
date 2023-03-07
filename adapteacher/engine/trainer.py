@@ -15,7 +15,7 @@ from detectron2.engine.train_loop import AMPTrainer
 from detectron2.utils.events import EventStorage
 from detectron2.evaluation import verify_results, DatasetEvaluators
 # from detectron2.evaluation import COCOEvaluator, verify_results, DatasetEvaluators
-
+# /home/gyt/adaptive_teacher/adapteacher/modeling
 from detectron2.data.dataset_mapper import DatasetMapper
 from detectron2.engine import hooks
 from detectron2.structures.boxes import Boxes
@@ -37,6 +37,7 @@ from adapteacher.evaluation import PascalVOCDetectionEvaluator, COCOEvaluator
 
 from .probe import OpenMatchTrainerProbe
 import copy
+import wandb
 
 
 # Supervised-only Trainer
@@ -283,6 +284,8 @@ class ATeacherTrainer(DefaultTrainer):
         Use the custom checkpointer, which loads other backbone models
         with matching heuristics.
         """
+        # import pdb
+        # pdb.set_trace()
         cfg = DefaultTrainer.auto_scale_workers(cfg, comm.get_world_size())
         data_loader = self.build_train_loader(cfg)
 
@@ -391,10 +394,11 @@ class ATeacherTrainer(DefaultTrainer):
     def train_loop(self, start_iter: int, max_iter: int):
         logger = logging.getLogger(__name__)
         logger.info("Starting training from iteration {}".format(start_iter))
-
+        
         self.iter = self.start_iter = start_iter
         self.max_iter = max_iter
-
+        wandb.watch(self.model)
+        
         with EventStorage(start_iter) as self.storage:
             try:
                 self.before_train()
@@ -521,7 +525,7 @@ class ATeacherTrainer(DefaultTrainer):
                     loss_dict[key] = record_dict[key] * 1
             losses = sum(loss_dict.values())
 
-        else:
+        elif self.iter < self.cfg.SEMISUPNET.FORCE_PUSH_STEP:
             if self.iter == self.cfg.SEMISUPNET.BURN_UP_STEP:
                 # update copy the the whole model
                 self._update_teacher_model(keep_rate=0.00)
@@ -667,6 +671,158 @@ class ATeacherTrainer(DefaultTrainer):
 
             losses = sum(loss_dict.values())
 
+        #在训练最后阶段，冻结img和ins的D，只更新backbone
+        else:
+            if self.iter == self.cfg.SEMISUPNET.FORCE_PUSH_STEP:
+                # update copy the the whole model
+                self._update_teacher_model_freeze_Dimg(keep_rate=0.00)
+                # self.model.build_discriminator()
+
+            elif (
+                self.iter - self.cfg.SEMISUPNET.FORCE_PUSH_STEP
+            ) % self.cfg.SEMISUPNET.TEACHER_UPDATE_ITER == 0:
+                self._update_teacher_model_freeze_Dimg(
+                    keep_rate=self.cfg.SEMISUPNET.EMA_KEEP_RATE)# 该更新教师模型了
+                
+            record_dict = {}
+            
+            # 冻结D_img的参数
+            # self.D_img.eval()不行，只能冻结bn层
+            for name, param in self.model.named_parameters():
+                # import pdb
+                # pdb.set_trace()
+                if name.startswith("D"):
+                    param.requires_grad = False
+                    
+            #  1. generate the pseudo-label using teacher model
+            # with torch.no_grad():
+            #     (
+            #         _,
+            #         proposals_rpn_unsup_k,
+            #         proposals_roih_unsup_k,
+            #         _,
+            #     ) = self.model_teacher(unlabel_data_k, branch="unsup_data_weak")
+            with torch.no_grad():
+                (
+                    proposals_rpn_unsup_k,
+                    proposals_roih_unsup_k,
+                    _,
+                ) = self.model_teacher(unlabel_data_k, branch="unsup_data_weak") #将Target输入教师模型预测伪标签
+
+            ######################## For probe #################################
+            # import pdb; pdb. set_trace() 
+
+            # probe_metrics = ['compute_fp_gtoutlier', 'compute_num_box']
+            # probe_metrics = ['compute_num_box']  
+            # analysis_pred, _ = self.probe.compute_num_box(gt_unlabel_k,proposals_roih_unsup_k,'pred')
+            # record_dict.update(analysis_pred)
+            ######################## For probe END #################################
+
+            #  2. Pseudo-labeling
+            cur_threshold = self.cfg.SEMISUPNET.BBOX_THRESHOLD
+
+            joint_proposal_dict = {}
+            joint_proposal_dict["proposals_rpn"] = proposals_rpn_unsup_k
+            #Process pseudo labels and thresholding
+            (
+                pesudo_proposals_rpn_unsup_k,
+                nun_pseudo_bbox_rpn,
+            ) = self.process_pseudo_label(
+                proposals_rpn_unsup_k, cur_threshold, "rpn", "thresholding"
+            )
+            # analysis_pred, _ = self.probe.compute_num_box(gt_unlabel_k,pesudo_proposals_rpn_unsup_k,'pred',True)
+            # record_dict.update(analysis_pred)
+
+            joint_proposal_dict["proposals_pseudo_rpn"] = pesudo_proposals_rpn_unsup_k
+            # Pseudo_labeling for ROI head (bbox location/objectness)
+            pesudo_proposals_roih_unsup_k, _ = self.process_pseudo_label(
+                proposals_roih_unsup_k, cur_threshold, "roih", "thresholding"
+            )
+            joint_proposal_dict["proposals_pseudo_roih"] = pesudo_proposals_roih_unsup_k
+
+            # 3. add pseudo-label to unlabeled data
+
+            unlabel_data_q = self.add_label(
+                unlabel_data_q, joint_proposal_dict["proposals_pseudo_roih"]
+            )
+            unlabel_data_k = self.add_label(
+                unlabel_data_k, joint_proposal_dict["proposals_pseudo_roih"]
+            )
+
+            all_label_data = label_data_q + label_data_k
+            all_unlabel_data = unlabel_data_q
+
+            # 4. input both strongly and weakly augmented labeled data into student model
+            # record_all_label_data, _, _, _ = self.model(
+            #     all_label_data, branch="supervised"
+            # )
+            record_all_label_data = self.model(
+                all_label_data, branch="supervised"
+            )
+            record_dict.update(record_all_label_data)
+
+            # 5. input strongly augmented unlabeled data into model
+            # record_all_unlabel_data, _, _, _ = self.model(
+            #     all_unlabel_data, branch="supervised_target"
+            # )
+            record_all_unlabel_data = self.model(
+                all_unlabel_data, branch="supervised_target"
+            )
+            new_record_all_unlabel_data = {}
+            for key in record_all_unlabel_data.keys():
+                new_record_all_unlabel_data[key + "_pseudo"] = record_all_unlabel_data[
+                    key
+                ]
+            record_dict.update(new_record_all_unlabel_data)
+
+            # 6. input weakly labeled data (source) and weakly unlabeled data (target) to student model
+            # give sign to the target data
+
+            # 将强弱增强的S的图片同时输入模型的force分支
+            all_label_data = label_data_q + label_data_k
+            
+
+            record_all_label_data = self.model(
+                all_label_data, branch="forced"
+            )
+            record_dict.update(record_all_label_data)
+
+
+            # weight losses
+            loss_dict = {}
+            # print(record_dict.keys())
+            for key in record_dict.keys():
+                if key.startswith("loss"):
+                    if key == "loss_rpn_loc_pseudo" or key == "loss_box_reg_pseudo":
+                        # pseudo bbox regression <- 0
+                        loss_dict[key] = record_dict[key] * 0
+                    elif key[-6:] == "pseudo":  # unsupervised loss
+                        loss_dict[key] = (
+                            record_dict[key] *
+                            self.cfg.SEMISUPNET.UNSUP_LOSS_WEIGHT
+                        )
+                    elif (
+                        key == "loss_D_img_st"
+                    ):  # set weight for discriminator
+                        # import pdb
+                        # pdb.set_trace()
+                        loss_dict[key] = record_dict[key] * self.cfg.SEMISUPNET.DIS_LOSS_WEIGHT #Need to modify defaults and yaml
+                    else:  # supervised loss
+                        loss_dict[key] = record_dict[key] * 1 # ((self.cfg.SOLVER.MAX_ITER-self.iter)/self.cfg.SOLVER.MAX_ITER)
+
+            losses = sum(loss_dict.values())
+
+            
+            
+
+            # for key in record_dict.keys():
+            #     if key == "loss_D_img_st":  # set weight for discriminator
+            #         # import pdb
+            #         # pdb.set_trace()
+            #         loss_dict[key] = record_dict[key] * self.cfg.SEMISUPNET.DIS_LOSS_WEIGHT #Need to modify defaults and yaml
+            # losses = sum(loss_dict.values())
+            
+            
         metrics_dict = record_dict
         metrics_dict["data_time"] = data_time
         self._write_metrics(metrics_dict)
@@ -729,6 +885,30 @@ class ATeacherTrainer(DefaultTrainer):
                     student_model_dict[key] *
                     (1 - keep_rate) + value * keep_rate
                 )
+            else:
+                raise Exception("{} is not found in student model".format(key))
+
+        self.model_teacher.load_state_dict(new_teacher_dict)
+    
+    @torch.no_grad()
+    def _update_teacher_model_freeze_Dimg(self, keep_rate=0.9996):
+        if comm.get_world_size() > 1:
+            student_model_dict = {
+                key[7:]: value for key, value in self.model.state_dict().items()
+            }
+        else:
+            student_model_dict = self.model.state_dict()
+
+        new_teacher_dict = OrderedDict()
+        for key, value in self.model_teacher.state_dict().items():
+            if key in student_model_dict.keys() :
+                if not key.startswith("D_img"):
+                    new_teacher_dict[key] = (
+                        student_model_dict[key] *
+                        (1 - keep_rate) + value * keep_rate
+                    )
+                else: 
+                    new_teacher_dict[key] = student_model_dict[key] 
             else:
                 raise Exception("{} is not found in student model".format(key))
 

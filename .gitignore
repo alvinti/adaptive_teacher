@@ -6,3 +6,4 @@ output
 weights
 change_model_weight.py
 test.ipynb
+wandb

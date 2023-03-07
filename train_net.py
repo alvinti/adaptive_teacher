@@ -18,6 +18,7 @@ import adapteacher.data.datasets.builtin
 
 from adapteacher.modeling.meta_arch.ts_ensemble import EnsembleTSModel
 
+import wandb
 
 def setup(args):
     """
@@ -35,6 +36,7 @@ def setup(args):
 
 def main(args):
     cfg = setup(args)
+    wandb.init(project="adaptive_teacher", config=cfg)
     if cfg.SEMISUPNET.Trainer == "ateacher":
         Trainer = ATeacherTrainer
     elif cfg.SEMISUPNET.Trainer == "baseline":

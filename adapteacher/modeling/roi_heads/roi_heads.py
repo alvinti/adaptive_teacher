@@ -12,7 +12,8 @@ from detectron2.modeling.roi_heads import (
     ROI_HEADS_REGISTRY,
     StandardROIHeads,
 )
-from detectron2.modeling.roi_heads.fast_rcnn import FastRCNNOutputLayers
+# from detectron2.modeling.roi_heads.fast_rcnn import FastRCNNOutputLayers
+from adapteacher.modeling.roi_heads.fast_rcnn_new import FastRCNNOutputLayers
 from adapteacher.modeling.roi_heads.fast_rcnn import FastRCNNFocaltLossOutputLayers
 
 import numpy as np
@@ -48,6 +49,8 @@ class StandardROIHeadsPseudoLab(StandardROIHeads):
                 channels=in_channels, height=pooler_resolution, width=pooler_resolution
             ),
         )
+        # import pdb
+        # pdb.set_trace()
         if cfg.MODEL.ROI_HEADS.LOSS == "CrossEntropy":
             box_predictor = FastRCNNOutputLayers(cfg, box_head.output_shape)
         elif cfg.MODEL.ROI_HEADS.LOSS == "FocalLoss":
@@ -71,6 +74,7 @@ class StandardROIHeadsPseudoLab(StandardROIHeads):
         compute_loss=True,
         branch="",
         compute_val_loss=False,
+        domain = None,
     ) -> Tuple[List[Instances], Dict[str, torch.Tensor]]:
 
         del images
@@ -93,7 +97,7 @@ class StandardROIHeadsPseudoLab(StandardROIHeads):
 
         if (self.training and compute_loss) or compute_val_loss:
             losses, _, box_features = self._forward_box(
-                features, proposals, compute_loss, compute_val_loss, branch
+                features, proposals, compute_loss, compute_val_loss, branch, domain
             )
             return proposals, losses, box_features
         else:
@@ -110,6 +114,7 @@ class StandardROIHeadsPseudoLab(StandardROIHeads):
         compute_loss: bool = True,
         compute_val_loss: bool = False,
         branch: str = "",
+        domain = None, 
     ) -> Union[Dict[str, torch.Tensor], List[Instances]]:
         features = [features[f] for f in self.box_in_features]
         box_features = self.box_pooler(features, [x.proposal_boxes for x in proposals])
@@ -121,7 +126,7 @@ class StandardROIHeadsPseudoLab(StandardROIHeads):
         if (
             self.training and compute_loss
         ) or compute_val_loss:  # apply if training loss or val loss
-            losses = self.box_predictor.losses(predictions, proposals)
+            losses = self.box_predictor.losses(predictions, proposals, domain)
 
             if self.train_on_pred_boxes:
                 with torch.no_grad():
